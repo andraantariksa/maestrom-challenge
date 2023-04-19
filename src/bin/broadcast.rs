@@ -63,11 +63,13 @@ impl Node<RequestDetail, ResponseDetail, Event> for BroadcastNode {
     fn respond_request<W: Write>(&mut self, _writer: &mut W, request: Message<RequestDetail>) -> ResponseDetail {
         match request.body.detail {
             RequestDetail::Topology { topology } => {
-                let mut nodes = topology.keys().map(|s| s.to_owned()).collect::<HashSet<String>>();
+                // Populating reachable nodes within topology
+                let mut nodes = topology.keys().map(|x| x.to_owned()).collect::<HashSet<String>>();
                 for (_, connected_nodes) in &topology {
                     nodes.extend(connected_nodes.to_owned());
                 }
                 self.known_neighbor_value.extend(nodes.into_iter().map(|node| (node, HashSet::new())));
+
                 self.topology = Some(topology);
 
                 ResponseDetail::TopologyOk
@@ -86,8 +88,10 @@ impl Node<RequestDetail, ResponseDetail, Event> for BroadcastNode {
                 ResponseDetail::BroadcastOk
             }
             RequestDetail::Gossip { ids } => {
+                // We know that the requesting node has `ids` values
                 self.known_neighbor_value.get_mut(&request.src).unwrap().extend(ids.clone());
                 self.ids.extend(ids);
+                // Let the requesting node to know all of our values
                 ResponseDetail::GossipOk { ids: self.ids.clone() }
             }
         }
@@ -98,6 +102,7 @@ impl Node<RequestDetail, ResponseDetail, Event> for BroadcastNode {
             ResponseDetail::TopologyOk => unreachable!(),
             ResponseDetail::ReadOk { .. } => unreachable!(),
             ResponseDetail::BroadcastOk => unreachable!(),
+            // Keep our values
             ResponseDetail::GossipOk { ids } => {
                 self.ids.extend(ids);
             }
@@ -111,8 +116,14 @@ impl Node<RequestDetail, ResponseDetail, Event> for BroadcastNode {
                     let default = HashSet::new();
                     let node_connections = &topology[self.name.as_ref().unwrap()];
                     for node in node_connections {
+                        // Exclude values known by node we're requesting to
                         let known_node_values = self.known_neighbor_value.get(node).unwrap_or(&default);
-                        let sent_ids = self.ids.clone().difference(known_node_values).map(|x| x.to_owned()).collect::<HashSet<usize>>();
+                        let sent_ids = self.ids.clone().difference(known_node_values).copied().collect::<HashSet<usize>>();
+
+                        if sent_ids.is_empty() {
+                            continue;
+                        }
+
                         self.send(writer, node.to_owned(), RequestDetail::Gossip { ids: sent_ids });
                     }
                 }
@@ -125,6 +136,10 @@ impl Node<RequestDetail, ResponseDetail, Event> for BroadcastNode {
     }
 }
 
+// This is basically just a 2 general problem
+// We should never assume that another node knows what we know, unless they had confirm it
+// So we send them everything we know until they sent us back everything what they know, then
+// we can assume that they know what we're sending from the former event
 fn main() {
     process(BroadcastNode::new());
 }
