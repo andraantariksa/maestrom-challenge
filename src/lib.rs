@@ -1,7 +1,9 @@
-use std::collections::HashMap;
-use std::io;
-use std::io::{BufRead, Read, Stdin, Stdout, StdoutLock, Write};
-use serde_json::Value;
+
+use std::{io, thread};
+use std::io::{BufRead, Write};
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,19 +20,25 @@ pub enum InitDetails {
     InitOk,
 }
 
+pub enum Input<REQ, RESP, EV: Send> {
+    Request(Message<REQ>),
+    Response(Message<RESP>),
+    Event(EV),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MessageBody<D> {
-    msg_id: Option<usize>,
-    in_reply_to: Option<usize>,
+pub struct MessageBody<D> {
+    pub msg_id: Option<usize>,
+    pub in_reply_to: Option<usize>,
     #[serde(flatten)]
-    detail: D,
+    pub detail: D,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message<D> {
-    src: String,
-    dest: String,
-    body: MessageBody<D>,
+    pub src: String,
+    pub dest: String,
+    pub body: MessageBody<D>,
 }
 
 impl<D> Message<D> {
@@ -49,38 +57,52 @@ impl<D> Message<D> {
     }
 }
 
-pub trait Node<DREQ: Serialize + for<'a> Deserialize<'a> + Clone, DRESP: Serialize + for<'a> Deserialize<'a> + Clone> {
-    fn init<W: Write>(&mut self, writer: &mut W, input: &str)
+pub trait Node<REQ, RESP, EV>
+    where REQ: Serialize + for<'a> Deserialize<'a> + Clone,
+          RESP: Serialize + for<'a> Deserialize<'a> + Clone,
+          EV: Send {
+    fn init<W: Write>(&mut self, writer: &mut W, sender: Sender<Input<REQ, RESP, EV>>, input: &str)
         where Self: Sized {
         let message_req: Message<InitDetails> = serde_json::from_str(input).unwrap();
 
         if let InitDetails::Init(ref node_init) = message_req.body.detail {
-            self.on_init(node_init);
+            self.on_init(sender, node_init);
         } else {
             unreachable!();
         }
         message_req.reply(writer, InitDetails::InitOk);
     }
 
-    fn on_init(&mut self, message: &NodeInit);
+    fn on_init(&mut self, sender: Sender<Input<REQ, RESP, EV>>, message: &NodeInit);
 
-    fn step<W: Write>(&mut self, writer: &mut W, input: &str) {
-        if let Ok(message_req) = serde_json::from_str::<Message<DREQ>>(input) {
-            let detail = self.respond_request(&mut *writer, message_req.body.detail.clone());
-            message_req.reply(writer, detail);
-        } else if let Ok(message_resp) = serde_json::from_str::<Message<DRESP>>(input) {
-            self.respond_response(&mut *writer, message_resp.body.detail.clone());
-        }
+    fn process<W: Write>(&mut self, writer: &mut W, input: Input<REQ, RESP, EV>) {
+        match input {
+            Input::Request(req) => {
+                let detail = self.respond_request(&mut *writer, req.clone());
+                req.reply(writer, detail);
+            }
+            Input::Response(resp) => {
+                self.respond_response(&mut *writer, resp)
+            }
+            Input::Event(ev) => {
+                self.respond_event(&mut *writer, ev);
+            }
+        };
     }
 
-    fn respond_request<W: Write>(&mut self, writer: &mut W, request_detail: DREQ) -> DRESP;
-    fn respond_response<W: Write>(&mut self, writer: &mut W, response_detail: DRESP);
+    fn respond_request<W: Write>(&mut self, writer: &mut W, request: Message<REQ>) -> RESP;
+    fn respond_response<W: Write>(&mut self, _writer: &mut W, _response: Message<RESP>) {
+        unreachable!();
+    }
+    fn respond_event<W: Write>(&mut self, _writer: &mut W, _event: EV) {
+        unreachable!();
+    }
 
     fn get_name(&self) -> &str {
         unreachable!()
     }
 
-    fn send<W: Write>(&self, writer: &mut W, dest: String, detail: DREQ) {
+    fn send<W: Write>(&self, writer: &mut W, dest: String, detail: REQ) {
         let message = Message {
             src: self.get_name().to_owned(),
             dest,
@@ -95,14 +117,35 @@ pub trait Node<DREQ: Serialize + for<'a> Deserialize<'a> + Clone, DRESP: Seriali
     }
 }
 
-pub fn process<DETAIL: Serialize + for<'a> Deserialize<'a> + Clone, DETAIL2: Serialize + for<'a> Deserialize<'a> + Clone>(mut node: impl Node<DETAIL, DETAIL2>) {
+pub fn process<REQ, RESP, EV>(mut node: impl Node<REQ, RESP, EV>)
+    where REQ: Serialize + for<'a> Deserialize<'a> + Clone + Send + 'static,
+          RESP: Serialize + for<'a> Deserialize<'a> + Clone + Send + 'static,
+          EV: Send + 'static
+{
     let mut stdout = io::stdout().lock();
-    let mut stdin = io::stdin().lock();
-    let mut stdin_lines = stdin.lines();
 
-    node.init(&mut stdout, stdin_lines.next().unwrap().unwrap().as_ref());
+    let (tx, rx) = mpsc::channel();
 
-    for line in stdin_lines {
-        node.step(&mut stdout, line.unwrap().as_ref());
+    {
+        let stdin = io::stdin().lock();
+        let mut stdin_lines = stdin.lines();
+        node.init(&mut stdout, tx.clone(), stdin_lines.next().unwrap().unwrap().as_ref());
+    }
+
+    thread::spawn(move || {
+        let stdin = io::stdin().lock();
+        let stdin_lines = stdin.lines();
+        for line in stdin_lines {
+            let line = line.as_ref().unwrap();
+            if let Ok(message_req) = serde_json::from_str::<Message<REQ>>(line) {
+                tx.send(Input::Request(message_req)).unwrap();
+            } else if let Ok(message_resp) = serde_json::from_str::<Message<RESP>>(line) {
+                tx.send(Input::Response(message_resp)).unwrap();
+            }
+        }
+    });
+
+    for input in rx {
+        node.process(&mut stdout, input);
     }
 }

@@ -9,10 +9,12 @@ eval "$(
 )"
 
 flag=""
+dir_name="debug"
 if [ "$RELEASE" = true ]
 then
   flag="--release"
+  dir_name="release"
 fi
 
-cargo build $(flag) --bin broadcast
-$MAELSTORM_DIR/maelstrom test -w broadcast --bin target/debug/broadcast --node-count 5 --time-limit 20 --rate 10 --nemesis partition
+cargo build $flag --bin broadcast
+$MAELSTORM_DIR/maelstrom test -w broadcast --bin target/$dir_name/broadcast --node-count 25 --time-limit 20 --rate 100 --latency 100

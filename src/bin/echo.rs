@@ -1,5 +1,6 @@
 use std::io::Write;
-use maelstorm_challenge::{process, Node, NodeInit};
+use std::sync::mpsc::Sender;
+use maelstorm_challenge::{process, Node, NodeInit, Input, Message};
 use serde::{Serialize, Deserialize};
 
 
@@ -30,21 +31,17 @@ impl EchoNode {
     }
 }
 
-impl Node<RequestDetail, ResponseDetail> for EchoNode {
-    fn on_init(&mut self, message: &NodeInit) {
+impl Node<RequestDetail, ResponseDetail, ()> for EchoNode {
+    fn on_init(&mut self, _sender: Sender<Input<RequestDetail, ResponseDetail, ()>>, message: &NodeInit) {
         self.name = Some(message.node_id.clone());
     }
 
-    fn respond_request<W: Write>(&mut self, writer: &mut W, input: RequestDetail) -> ResponseDetail {
-        match input {
+    fn respond_request<W: Write>(&mut self, _writer: &mut W, request: Message<RequestDetail>) -> ResponseDetail {
+        match request.body.detail {
             RequestDetail::Echo { echo } => {
                 ResponseDetail::EchoOk { echo }
             }
         }
-    }
-
-    fn respond_response<W: Write>(&mut self, writer: &mut W, response_detail: ResponseDetail) {
-        unreachable!()
     }
 }
 

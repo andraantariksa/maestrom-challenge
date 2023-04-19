@@ -9,10 +9,12 @@ eval "$(
 )"
 
 flag=""
+dir_name="debug"
 if [ "$RELEASE" = true ]
 then
   flag="--release"
+  dir_name="release"
 fi
 
 cargo build $(flag) --bin echo
-$MAELSTORM_DIR/maelstrom test -w echo --bin target/debug/echo --node-count 1 --time-limit 10
+$MAELSTORM_DIR/maelstrom test -w echo --bin target/$dir_name/echo --node-count 1 --time-limit 10

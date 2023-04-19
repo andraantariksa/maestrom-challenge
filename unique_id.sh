@@ -9,10 +9,12 @@ eval "$(
 )"
 
 flag=""
+dir_name="debug"
 if [ "$RELEASE" = true ]
 then
   flag="--release"
+  dir_name="release"
 fi
 
 cargo build $(flag) --bin unique_ids
-$MAELSTORM_DIR/maelstrom test -w unique-ids --bin target/debug/unique_ids --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
+$MAELSTORM_DIR/maelstrom test -w unique-ids --bin target/$dir_name/unique_ids --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
